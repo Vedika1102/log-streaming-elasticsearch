@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.db
+*.cfg
+
+# Virtual environment
+.venv/
+venv/
+
+# Dependencies
+requirements.txt
+
+# Airflow
+logs/
+
+# Secrets
+.env
+secrets.json
+.aws/
+
+# IDEs
+.DS_Store         # macOS Finder metadata
+.idea/            # JetBrains IDEs (PyCharm)
+.vscode/          # Visual Studio Code
+
+# Docker/PIDs
+*.pid
+docker-compose.yml
