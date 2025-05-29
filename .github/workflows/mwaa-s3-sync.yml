@@ -1,0 +1,30 @@
+name: S3 Synchronisation
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Sync to S3 bucket
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: >
+            --delete
+            --exclude '.git/*'
+            --exclude '.github/*'
+            --exclude '.gitignore'
+            --exclude '.gitattributes'
+            --exclude 'README.md'
+        env:
+          AWS_S3_BUCKET: dml-youtube-prod1           # e.g., mwaa-dags-bucket
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1                     # Or your region
+          SOURCE_DIR: project025                       # Adjust if your DAGs are in a different folder

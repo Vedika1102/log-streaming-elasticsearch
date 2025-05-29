@@ -1,4 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
 from confluent_kafka import Producer
 import json
 import random
@@ -8,11 +10,11 @@ from faker import Faker
 
 fake = Faker()
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+
 
 def get_secret(secret_name, region_name="us-east-1"):
     """Retrieve secrets from AWS Secrets Manager."""
-    session = boto3.session.Session(profile_name='realtime-logs-user')
+    session = boto3.session.Session()
     client = session.client(service_name='secretsmanager', region_name=region_name)
     try:
         response = client.get_secret_value(SecretId=secret_name)
@@ -21,9 +23,11 @@ def get_secret(secret_name, region_name="us-east-1"):
         logger.error(f"Secret retrieval error: {e}")
         raise
 
+
 def create_kafka_producer(config):
     """Create Kafka producer with configuration."""
     return Producer(config)
+
 
 def generate_log():
     """Generate a synthetic log entry."""
@@ -52,6 +56,7 @@ def generate_log():
     )
     return log_entry
 
+
 def delivery_report(err, msg):
     """Called once for each message produced to indicate delivery result."""
     if err is not None:
@@ -59,7 +64,7 @@ def delivery_report(err, msg):
     else:
         logger.info(f"Message delivered to {msg.topic()} [{msg.partition()}]")
 
-def produce_logs():
+def produce_logs(**context):
     """Produce log entries to Kafka."""
     secrets = get_secret("MWAA_Secrets_V2")
     kafka_config = {
@@ -84,6 +89,28 @@ def produce_logs():
 
     logger.info(f"Produced 1,000 logs to topic {topic}")
 
-# Run as a script
-if __name__ == "__main__":
-    produce_logs()
+
+# DAG Configuration
+default_args = {
+    'owner': 'Data Mastery Lab',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'retries': 1,
+    'retry_delay': timedelta(seconds=5),
+}
+
+dag = DAG(
+    'log_generation_pipeline',
+    default_args=default_args,
+    description='Generate and produce synthetic logs',
+    schedule_interval='*/2 * * * *',
+    start_date=datetime(2025, 1, 26),
+    catchup=False,
+    tags=['logs', 'kafka', 'production']
+)
+
+produce_logs_task = PythonOperator(
+    task_id='generate_and_produce_logs',
+    python_callable=produce_logs,
+    dag=dag,
+)

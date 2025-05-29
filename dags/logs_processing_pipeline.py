@@ -1,4 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
 from confluent_kafka import Consumer, KafkaException
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
@@ -7,13 +9,12 @@ import logging
 import boto3
 import re
 
-# Logger setup
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def get_secret(secret_name, region_name="us-east-1"):
     """Retrieve secrets from AWS Secrets Manager."""
-    session = boto3.session.Session(profile_name='realtime-logs-user')
+    session = boto3.session.Session()
     client = session.client(service_name='secretsmanager', region_name=region_name)
     try:
         response = client.get_secret_value(SecretId=secret_name)
@@ -22,9 +23,11 @@ def get_secret(secret_name, region_name="us-east-1"):
         logger.error(f"Secret retrieval error: {e}")
         raise
 
+
 def parse_log_entry(log_entry):
     """Parse Apache log entry into structured data."""
     log_pattern = r'(?P<ip>[\d\.]+) - - \[(?P<timestamp>.*?)\] "(?P<method>\w+) (?P<endpoint>[\w/]+) (?P<protocol>[\w/\.]+)" (?P<status>\d+) (?P<size>\d+) "(?P<referrer>.*?)" "(?P<user_agent>.*?)"'
+
     match = re.match(log_pattern, log_entry)
     if not match:
         logger.warning(f"Invalid log format: {log_entry}")
@@ -41,11 +44,12 @@ def parse_log_entry(log_entry):
 
     return data
 
-def consume_and_index_logs():
+
+def consume_and_index_logs(**context):
     """Consume logs from Kafka and index to Elasticsearch."""
     secrets = get_secret("MWAA_Secrets_V2")
 
-    # Kafka configuration
+    # Kafka consumer configuration
     consumer_config = {
         "bootstrap.servers": secrets['KAFKA_BOOTSTRAP_SERVER'],
         "security.protocol": "SASL_SSL",
@@ -53,7 +57,7 @@ def consume_and_index_logs():
         "sasl.username": secrets['KAFKA_SASL_USERNAME'],
         "sasl.password": secrets['KAFKA_SASL_PASSWORD'],
         "group.id": "airflow_log_indexer",
-        "auto.offset.reset": "latest"
+        "auto.offset.reset": "latest"  # Updated to process only latest messages
     }
 
     # Elasticsearch configuration
@@ -68,13 +72,14 @@ def consume_and_index_logs():
     consumer.subscribe([topic])
 
     try:
+        # Ensure data stream exists
         data_stream_name = "billion_website_logs"
         if not es.indices.exists(index=data_stream_name):
             es.indices.create(index=data_stream_name)
-            logger.info(f"Created index: {data_stream_name}")
+            logger.info(f"Created data stream: {data_stream_name}")
 
+        # Consume and index logs
         logs = []
-
         while True:
             msg = consumer.poll(timeout=1.0)
             if msg is None:
@@ -87,9 +92,11 @@ def consume_and_index_logs():
 
             log_entry = msg.value().decode('utf-8')
             parsed_log = parse_log_entry(log_entry)
+
             if parsed_log:
                 logs.append(parsed_log)
 
+            # Index when 1,000 logs are collected
             if len(logs) >= 1000:
                 actions = [
                     {
@@ -99,14 +106,15 @@ def consume_and_index_logs():
                     }
                     for log in logs
                 ]
+
                 try:
-                    success, _ = bulk(es, actions, refresh=True)
-                    logger.info(f"Indexed {success} logs")
+                    success, failed = bulk(es, actions, refresh=True)
+                    logger.info(f"Indexed {success} logs, {len(failed)} failed")
                     logs = []
                 except Exception as bulk_err:
                     logger.error(f"Bulk indexing error: {bulk_err}")
 
-        # Index any leftover logs
+        # Index any remaining logs
         if logs:
             actions = [
                 {
@@ -117,7 +125,6 @@ def consume_and_index_logs():
                 for log in logs
             ]
             bulk(es, actions, refresh=True)
-            logger.info(f"Indexed remaining {len(logs)} logs")
 
     except Exception as e:
         logger.error(f"Log processing error: {e}")
@@ -125,6 +132,31 @@ def consume_and_index_logs():
         consumer.close()
         es.close()
 
-# Run for testing
-if __name__ == "__main__":
-    consume_and_index_logs()
+
+# DAG Configuration
+default_args = {
+    'owner': 'Data Mastery Lab',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'retries': 1,
+    'retry_delay': timedelta(seconds=5),
+}
+
+dag = DAG(
+    'log_consumer_pipeline',
+    default_args=default_args,
+    description='Consume logs from Kafka and index to Elasticsearch',
+    schedule_interval='*/2 * * * *',
+    start_date=datetime(2024, 1, 25),
+    catchup=False,
+    tags=['logs', 'kafka', 'elasticsearch']
+)
+
+consume_logs_task = PythonOperator(
+    task_id='consume_and_index_logs',
+    python_callable=consume_and_index_logs,
+    dag=dag,
+)
+
+# Define task dependencies
+consume_logs_task
